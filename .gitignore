@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# runtime data (SQLite database + WAL files)
+data/
+
+# scratch files from sandboxed test runs
+.tmp/
+
+# misc
+.DS_Store
+npm-debug.log*
+*.tsbuildinfo
