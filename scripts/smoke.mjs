@@ -78,11 +78,44 @@ try {
   );
   check("binary file is not measured", byPath["bin.dat"] === undefined);
 
+  const byDir = Object.fromEntries(
+    (metrics.directories ?? []).map((d) => [d.path, { added: d.added, removed: d.removed }]),
+  );
+  let dirsMatch = Object.keys(EXPECTED.directories).length === (metrics.directories ?? []).length;
+  for (const [dirPath, expected] of Object.entries(EXPECTED.directories)) {
+    const got = byDir[dirPath];
+    if (!got || got.added !== expected.added || got.removed !== expected.removed) {
+      dirsMatch = false;
+    }
+  }
+  check(
+    "directory rollup (recursive, root = repo)",
+    dirsMatch,
+    JSON.stringify(byDir),
+  );
+
+  const repo = metrics.repoTotals ?? {};
+  check(
+    "repo metrics equal the root rollup and the file sums",
+    repo.added === EXPECTED.totals.added &&
+      repo.removed === EXPECTED.totals.removed &&
+      repo.growth === EXPECTED.totals.growth &&
+      repo.churn === EXPECTED.totals.churn &&
+      repo.added === metrics.totals.added &&
+      repo.removed === metrics.totals.removed,
+    JSON.stringify(repo),
+  );
+
   const page = await fetch(`${baseUrl}/repos/${repoId}`);
   const html = await page.text();
   check(
     "dashboard page renders the table",
     page.status === 200 && html.includes("d.txt") && html.includes("Churn"),
+    `HTTP ${page.status}`,
+  );
+  check(
+    "dashboard page renders the directory rollup",
+    page.status === 200 && html.includes("(repo root)") && html.includes("src/lib"),
     `HTTP ${page.status}`,
   );
 

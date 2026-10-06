@@ -144,3 +144,59 @@ button:disabled {
   opacity: 0.6;
   cursor: default;
 }
+
+/* Commit-set filter form */
+.choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.choice > input[type="radio"] {
+  margin: 0;
+}
+
+input[type="datetime-local"] {
+  padding: 5px 8px;
+  border: 1px solid #c9d1d9;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.picker {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #e2e6ea;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin: 8px 0;
+}
+
+.picker label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  margin: 0;
+  border-bottom: 1px solid #f0f2f4;
+  font-size: 13px;
+}
+
+.picker label:last-child {
+  border-bottom: 0;
+}
+
+.picker label.picked {
+  background: #eef4fd;
+}
+
+.picker label.picked code {
+  font-weight: 700;
+}
+
+.picker code {
+  font-size: 12px;
+}

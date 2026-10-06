@@ -43,6 +43,8 @@ export function ingestFromZip(zipPath: string, opts: { name: string }): IngestRe
  * - --no-merges: H-bar is the set of non-merge commits reachable from the ref
  * - --find-renames=50%: pure renames change no metrics; a rename+edit counts
  *   only the edit, attributed to the new path (handled in parseLog)
+ * - -z: raw NUL-separated paths with explicit old/new for renames, so rename
+ *   attribution stays exact whatever characters a filename contains
  * - deletions appear as removed lines on the deleted path
  * - committer date is stored per commit (%ct); raw author name/email are kept
  *   for the author-merge step later
@@ -62,6 +64,7 @@ export function ingestFromDirectory(
     "--no-merges",
     "--find-renames=50%",
     "--numstat",
+    "-z",
     `--format=${LOG_FORMAT}`,
     "HEAD",
   ]);

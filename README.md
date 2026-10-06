@@ -1,23 +1,33 @@
 # RAT — Repo Analysis Tool (step 0: walking skeleton)
 
 Upload a `.zip` of a Git repository (with its `.git` directory), ingest the full history
-once with `git log --numstat`, store per-commit file deltas in SQLite, and view per-file
-added / removed / growth / churn over the whole commit set.
+once with `git log --numstat -z`, store per-commit file deltas plus the per-commit directory
+rollup in SQLite, and view per-file / per-directory added / removed / growth / churn over
+the whole commit set (the root rollup is the repository metric).
 
 ## Hard rules enforced at ingest
 
 - **H̄ = non-merge commits reachable from HEAD** (`--no-merges`); merge commits are excluded.
 - **Rename detection at 50%** (`--find-renames=50%`): a pure rename changes no metrics;
-  a rename + edit counts only the edit, attributed to the **new** path.
-- **Deleting a file** records its lines as removed on that path.
-- **Binary files are not measured** (git's `-` numstat rows are dropped).
+  a rename + edit counts only the edit, attributed to the **new** path. The log is read in
+  git's NUL-separated `-z` numstat form, which reports raw old/new paths with no quoting or
+  brace compression — attribution stays exact for any filename (quotes, backslashes, tabs).
+- **Deleting a file** records its lines as removed on that path. (A file that disappears
+  only in a merge or subtree import has no deletion in any H̄ commit, so it records none —
+  e.g. cJSON's `tests/unity` lineage moves files inside the excluded merge.)
+- **Binary files are not measured** (git's `-` numstat rows are dropped, renamed binaries
+  included).
 - **Committer date** is stored per commit; raw author name/email are kept for the later
   author-merge step.
 - **Initial commit** (h[p] = empty commit) is diffed against the empty tree, so all its
   lines count as added.
+- **Directory metrics are a recursive rollup materialized at ingest**: a directory's
+  l+ / l− / δ / λ is the sum over its immediate child files and subdirectories (so it
+  already contains every file below it). The root is stored as `.`, making the root row
+  the repository metrics.
 
-Not implemented yet (later steps): directory/repo rollups, commit-set and author metrics,
-filters, mailmap/manual author merge, URL cloning, multi-repo UX, charts.
+Not implemented yet (later steps): commit-set and author metrics, filters,
+mailmap/manual author merge, URL cloning, multi-repo UX, charts.
 
 ## Requirements
 
@@ -55,8 +65,11 @@ npm start
 
 ## Automated tests
 
-Parser unit tests + ingest integration tests (builds a real fixture repo with hand-computed
-metrics: edits, pure rename, rename+edit, delete, binary add, merge commit exclusion).
+Parser unit tests + rollup unit tests + ingest integration tests (builds a real fixture repo
+with hand-computed metrics: edits, pure rename, rename+edit, delete, binary add, binary
+rename, quoted-filename add and rename, merge commit exclusion, nested-directory rollup
+incl. create-then-delete). The ingest test also cross-checks the stored totals against raw
+`git log --numstat` text-mode output parsed independently.
 No server needed; requires `git`.
 
 ```bash
@@ -134,6 +147,13 @@ To reset all stored data, stop the server and delete the `data/` folder.
    point in history — the pure-rename commit contributes 0/0 and the later lines
    are attributed to `README.md`, per the hard rules).
 
+   Directory metrics use the same sums restricted to everything below a directory:
+   for a directory `d`, sum the rows whose (rename-resolved) path starts with `d/`
+   — e.g. replace the `p == want` test above with `index(p, want "/") == 1`. The
+   root is every row, so it matches the repo-wide numbers above and the "Added
+   lines" / "Removed lines" cards. Sanity-check the directory table on the
+   repository page this way (e.g. `tests/unity` for cJSON).
+
 5. Error handling: upload a non-zip file, or a zip without `.git` — the form shows a red
    error and no repository is added.
 
@@ -146,24 +166,28 @@ curl -sS -F "file=@/tmp/cJSON.zip" -F "name=cJSON" http://localhost:3000/api/rep
 # list repositories
 curl -sS http://localhost:3000/api/repos
 
-# per-file metrics for one repository
+# per-file metrics, per-directory rollup and root (= repo) totals for one repository
 curl -sS http://localhost:3000/api/repos/1/metrics
 ```
+
+The metrics response contains `files` (per path), `directories` (recursive rollup, the
+root row is `.`), `totals` (file sums) and `repoTotals` (the root rollup).
 
 ## Project layout
 
 ```
 app/                        Next.js App Router pages + API routes
   api/repos/route.ts        POST upload+ingest, GET list
-  api/repos/[id]/metrics/   GET per-file metrics (JSON)
-  repos/[id]/page.tsx       repository dashboard (totals + per-file table)
+  api/repos/[id]/metrics/   GET file + directory + repo metrics (JSON)
+  repos/[id]/page.tsx       repository dashboard (repo cards + directory + file tables)
 components/UploadForm.tsx   client upload form
 lib/
   db.ts                     SQLite connection + schema (better-sqlite3)
-  queries.ts                SQL for per-file commit-set totals
+  queries.ts                SQL for per-file, per-directory and repo commit-set totals
+  rollup.ts                 pure recursive rollup (file deltas -> directory deltas, root = ".")
   git/parseLog.ts           pure parser for `git log --numstat` output
   git/gitcli.ts             locate the repo in an extract, run git
-  git/ingest.ts             zip extract -> parse -> store (the pipeline)
+  git/ingest.ts             zip extract -> parse -> rollup -> store (the pipeline)
 test/                       node:test unit + integration tests (fixture repo)
 scripts/smoke.mjs           HTTP end-to-end smoke test
 data/                       SQLite database (gitignored, created on first run)

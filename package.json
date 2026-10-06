@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "tsx --test test/parseLog.test.ts test/ingest.test.ts",
+    "test": "tsx --test test/parseLog.test.ts test/rollup.test.ts test/ingest.test.ts test/commitSet.test.ts",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
