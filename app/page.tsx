@@ -22,7 +22,8 @@ export default function HomePage() {
       <UploadForm />
       {repos.length === 0 ? (
         <p className="muted">
-          No repositories yet. Upload a .zip that includes the repository&apos;s .git directory.
+          No repositories yet. Upload a .zip that includes the repository&apos;s .git directory,
+          or paste a clone URL.
         </p>
       ) : (
         <table>

@@ -1,7 +1,15 @@
 import { NextResponse } from "next/server";
 import { parseCommitSetFilter } from "../../../../../lib/commitSet";
 import { getDb } from "../../../../../lib/db";
-import { queryCommitSetMetrics, resolveCommitShas } from "../../../../../lib/queries";
+import {
+  countMailmapMergedCommits,
+  queryAuthorLeaderboard,
+  queryCommitSetMetrics,
+  queryObjectAuthorMetrics,
+  queryObjectTopAuthors,
+  resolveCommitShas,
+  type ObjectTopAuthor,
+} from "../../../../../lib/queries";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +21,8 @@ export const dynamic = "force-dynamic";
 //                            bound optional
 //   ?mode=commits&commit=<sha>&commit=<sha>&shas=a,b → any subset of H-bar;
 //                            an empty selection is the empty commit set
+// Author metrics (the brief's 2.5) are always included:
+//   ?object=<path> → per-author mods/churn/ownership of that file or directory
 export async function GET(request: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const repoId = Number(id);
@@ -27,14 +37,32 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     return NextResponse.json({ error: "Repository not found." }, { status: 404 });
   }
 
-  const filter = parseCommitSetFilter(new URL(request.url).searchParams);
+  const searchParams = new URL(request.url).searchParams;
+  const filter = parseCommitSetFilter(searchParams);
   const { shas, unknown } = resolveCommitShas(repoId, filter.shaTokens);
-  const commitSet = queryCommitSetMetrics(repoId, {
+  const active = {
     mode: filter.mode,
     fromTs: filter.fromTs,
     toTs: filter.toTs,
     shas,
-  });
+  };
+  const commitSet = queryCommitSetMetrics(repoId, active);
+
+  // Author metrics: the leaderboard (root object) plus each object's top
+  // author, with h[a] = the .mailmap-mapped identity stored at ingest.
+  const authors = queryAuthorLeaderboard(repoId, active);
+  // Directories first so a path that was both a file and a directory keeps
+  // its file rows (the same precedence as queryObjectAuthorMetrics).
+  const byTopAuthor = new Map<string, ObjectTopAuthor>();
+  for (const row of queryObjectTopAuthors(repoId, active, "dir_deltas")) byTopAuthor.set(row.path, row);
+  for (const row of queryObjectTopAuthors(repoId, active, "file_deltas")) byTopAuthor.set(row.path, row);
+  const withTopAuthor = <T extends { path: string }>(
+    rows: T[],
+  ): Array<T & { topAuthor: ObjectTopAuthor | null }> =>
+    rows.map((row) => ({ ...row, topAuthor: byTopAuthor.get(row.path) ?? null }));
+
+  const objectPath = (searchParams.get("object") ?? "").trim();
+  const objectAuthors = objectPath === "" ? null : queryObjectAuthorMetrics(repoId, active, objectPath);
 
   return NextResponse.json({
     repo,
@@ -48,7 +76,12 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     commitSetSize: commitSet.size,
     totals: commitSet.repo,
     repoTotals: commitSet.repo,
-    files: commitSet.files,
-    directories: commitSet.directories,
+    files: withTopAuthor(commitSet.files),
+    directories: withTopAuthor(commitSet.directories),
+    authorMetrics: {
+      mailmapMergedCommits: countMailmapMergedCommits(repoId),
+      authors,
+      ...(objectAuthors === null ? {} : { object: objectAuthors }),
+    },
   });
 }

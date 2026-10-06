@@ -10,6 +10,9 @@ export interface ParsedCommit {
   committerTs: number;
   authorName: string;
   authorEmail: string;
+  /** Author identity after the .mailmap (%aN/%aE); falls back to the raw one. */
+  canonicalName: string;
+  canonicalEmail: string;
   files: ParsedFileDelta[];
   binaryFileCount: number;
 }
@@ -19,7 +22,8 @@ const FIELD_SEP = "\x02";
 
 /**
  * Parses the output of:
- *   git log --no-merges --find-renames=50% --numstat -z --format=%x01%H%x02%P%x02%ct%x02%an%x02%ae
+ *   git log --no-merges --find-renames=50% --numstat -z
+ *     --format=%x01%H%x02%P%x02%ct%x02%an%x02%ae%x02%aN%x02%aE
  *
  * In `-z` mode git emits NUL-separated records with *raw* paths — no C-style
  * quoting and no brace compression — and renamed entries carry the full old
@@ -33,6 +37,8 @@ const FIELD_SEP = "\x02";
  * - renames are attributed to the new path (the entry's second path)
  * - the initial commit has no parent (h[p] = empty commit); git already diffs
  *   it against the empty tree, so its lines count as added
+ * - the author is read twice: raw (%an/%ae) and after the .mailmap (%aN/%aE);
+ *   h[a] for every author metric is the mapped identity
  */
 export function parseGitLog(text: string): ParsedCommit[] {
   const commits: ParsedCommit[] = [];
@@ -73,15 +79,18 @@ export function parseGitLog(text: string): ParsedCommit[] {
     const line = raw.startsWith("\n") ? raw.slice(1) : raw;
 
     if (line.startsWith(COMMIT_MARK)) {
-      const [sha, parents, committerTs, authorName, authorEmail] = line
-        .slice(1)
-        .split(FIELD_SEP);
+      const fields = line.slice(1).split(FIELD_SEP);
+      const [sha, parents, committerTs, authorName, authorEmail, canonicalName, canonicalEmail] =
+        fields;
       current = {
         sha,
         parentSha: parents ? parents.split(" ")[0] : null,
         committerTs: Number.parseInt(committerTs, 10),
         authorName,
         authorEmail,
+        // Logs without the %aN/%aE fields (older callers) keep the raw identity.
+        canonicalName: canonicalName ?? authorName,
+        canonicalEmail: canonicalEmail ?? authorEmail,
         files: [],
         binaryFileCount: 0,
       };

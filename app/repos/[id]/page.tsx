@@ -9,9 +9,14 @@ import {
 } from "../../../lib/commitSet";
 import { getDb } from "../../../lib/db";
 import {
+  countMailmapMergedCommits,
+  queryAuthorLeaderboard,
   queryCommitPickerRows,
   queryCommitSetMetrics,
+  queryObjectAuthorMetrics,
+  queryObjectTopAuthors,
   resolveCommitShas,
+  type ObjectTopAuthor,
 } from "../../../lib/queries";
 import { ROOT_DIR } from "../../../lib/rollup";
 
@@ -60,6 +65,19 @@ export default async function RepoPage({
   const metrics = queryCommitSetMetrics(repoId, active);
   const pickerRows = queryCommitPickerRows(repoId);
   const selected = new Set(shas);
+
+  // Author metrics (section 2.5): every author is the .mailmap-mapped identity
+  // stored at ingest, so a merged author already owns all their commits.
+  const authors = queryAuthorLeaderboard(repoId, active);
+  const mailmapMerged = countMailmapMergedCommits(repoId);
+  const byTopAuthor = new Map<string, ObjectTopAuthor>();
+  for (const row of queryObjectTopAuthors(repoId, active, "dir_deltas")) byTopAuthor.set(row.path, row);
+  for (const row of queryObjectTopAuthors(repoId, active, "file_deltas")) byTopAuthor.set(row.path, row);
+
+  // ?object=<path> drills into one file or directory's per-author metrics.
+  const objectPath = (query.get("object") ?? "").trim();
+  const objectMetrics =
+    objectPath === "" ? null : queryObjectAuthorMetrics(repoId, active, objectPath);
 
   return (
     <>
@@ -165,6 +183,95 @@ export default async function RepoPage({
       </div>
 
       <div className="card">
+        <h2>Author metrics over the commit set</h2>
+        <p className="muted">
+          {mailmapMerged > 0
+            ? `Author identities are merged with the repository's .mailmap — ${mailmapMerged} of ${repo.commit_count} commits were re-attributed to their canonical author.`
+            : "No .mailmap merges applied (no .mailmap in the repository, or none of its rules matched) — each commit keeps its raw author identity."}
+        </p>
+        <p className="muted">
+          Author churn λ is the root-object churn (all files roll up to the root); ownership
+          ω = λ<sub>a</sub> / λ<sub>root</sub>, 0 when the churn is 0. Click a path in the tables
+          below for its per-author breakdown.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Author</th>
+              <th className="num">Commits</th>
+              <th className="num">Added</th>
+              <th className="num">Removed</th>
+              <th className="num">Growth</th>
+              <th className="num">Churn λ</th>
+              <th className="num">Ownership ω</th>
+            </tr>
+          </thead>
+          <tbody>
+            {authors.map((author) => (
+              <tr key={`${author.name} <${author.email}>`}>
+                <td>
+                  {author.name} <span className="muted">&lt;{author.email}&gt;</span>
+                </td>
+                <td className="num">{author.commits}</td>
+                <td className="num">{author.added}</td>
+                <td className="num">{author.removed}</td>
+                <td className="num">{author.growth}</td>
+                <td className="num">{author.churn}</td>
+                <td className="num">{formatOwnership(author.ownership)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {objectPath !== "" && objectMetrics === null && (
+        <p className="error">
+          No measured changes on &quot;{objectPath}&quot; in this commit set (binary files and
+          pure renames leave no author rows).
+        </p>
+      )}
+
+      {objectMetrics !== null && (
+        <div className="card">
+          <h2>
+            Author metrics — {objectMetrics.path === ROOT_DIR ? "(repo root)" : objectMetrics.path}{" "}
+            <span className="muted">({objectMetrics.kind})</span>
+          </h2>
+          <p className="muted">
+            Per-author modifications n (commits with λ(h, o) &gt; 0), churn λ<sub>a</sub> and
+            ownership ω = λ<sub>a</sub> / λ<sub>o</sub> on this one object over the commit set
+            (total churn {objectMetrics.churn}).
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Author</th>
+                <th className="num">Mods n</th>
+                <th className="num">Added</th>
+                <th className="num">Removed</th>
+                <th className="num">Churn λ</th>
+                <th className="num">Ownership ω</th>
+              </tr>
+            </thead>
+            <tbody>
+              {objectMetrics.authors.map((author) => (
+                <tr key={`${author.name} <${author.email}>`}>
+                  <td>
+                    {author.name} <span className="muted">&lt;{author.email}&gt;</span>
+                  </td>
+                  <td className="num">{author.modifications}</td>
+                  <td className="num">{author.added}</td>
+                  <td className="num">{author.removed}</td>
+                  <td className="num">{author.churn}</td>
+                  <td className="num">{formatOwnership(author.ownership)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="card">
         <h2>Directory metrics over the commit set</h2>
         <p className="muted">
           Recursive rollup materialized at ingest: l+/l−/δ/λ summed over h ∈ H, modifications n
@@ -182,12 +289,18 @@ export default async function RepoPage({
               <th className="num">Mods n</th>
               <th className="num">η</th>
               <th className="num">ρ</th>
+              <th>Top author</th>
+              <th className="num">ω</th>
             </tr>
           </thead>
           <tbody>
             {metrics.directories.map((dir) => (
               <tr key={dir.path}>
-                <td>{dir.path === ROOT_DIR ? "(repo root)" : dir.path}</td>
+                <td>
+                  <Link href={objectHref(query, repo.id, dir.path)}>
+                    {dir.path === ROOT_DIR ? "(repo root)" : dir.path}
+                  </Link>
+                </td>
                 <td className="num">{dir.added}</td>
                 <td className="num">{dir.removed}</td>
                 <td className="num">{dir.growth}</td>
@@ -195,6 +308,7 @@ export default async function RepoPage({
                 <td className="num">{dir.modifications}</td>
                 <td className="num">{formatRatio(dir.modFrequency)}</td>
                 <td className="num">{formatRatio(dir.churnRate)}</td>
+                <TopAuthorCells topAuthor={byTopAuthor.get(dir.path)} />
               </tr>
             ))}
           </tbody>
@@ -218,12 +332,16 @@ export default async function RepoPage({
               <th className="num">Mods n</th>
               <th className="num">η</th>
               <th className="num">ρ</th>
+              <th>Top author</th>
+              <th className="num">ω</th>
             </tr>
           </thead>
           <tbody>
             {metrics.files.map((file) => (
               <tr key={file.path}>
-                <td>{file.path}</td>
+                <td>
+                  <Link href={objectHref(query, repo.id, file.path)}>{file.path}</Link>
+                </td>
                 <td className="num">{file.added}</td>
                 <td className="num">{file.removed}</td>
                 <td className="num">{file.growth}</td>
@@ -231,11 +349,39 @@ export default async function RepoPage({
                 <td className="num">{file.modifications}</td>
                 <td className="num">{formatRatio(file.modFrequency)}</td>
                 <td className="num">{formatRatio(file.churnRate)}</td>
+                <TopAuthorCells topAuthor={byTopAuthor.get(file.path)} />
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+    </>
+  );
+}
+
+/** Link to one object's per-author metrics, keeping the current commit-set filter. */
+function objectHref(query: URLSearchParams, repoId: number, objectPath: string): string {
+  const params = new URLSearchParams(query.toString());
+  params.set("object", objectPath);
+  return `/repos/${repoId}?${params.toString()}`;
+}
+
+/** The top-author cells of a metrics row; "—" when the object has no author rows. */
+function TopAuthorCells({ topAuthor }: { topAuthor?: ObjectTopAuthor }) {
+  if (topAuthor === undefined) {
+    return (
+      <>
+        <td className="muted">—</td>
+        <td className="num muted">—</td>
+      </>
+    );
+  }
+  return (
+    <>
+      <td>
+        {topAuthor.name} <span className="muted">&lt;{topAuthor.email}&gt;</span>
+      </td>
+      <td className="num">{formatOwnership(topAuthor.ownership)}</td>
     </>
   );
 }
@@ -253,6 +399,11 @@ function toUrlSearchParams(record: SearchParams): URLSearchParams {
 /** η and ρ are ratios; three decimals keep the columns comparable. */
 function formatRatio(value: number): string {
   return value.toFixed(3);
+}
+
+/** Ownership ω ∈ [0, 1] — shown as a percentage with one decimal. */
+function formatOwnership(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 function Stat({ label, value }: { label: string; value: number | string }) {

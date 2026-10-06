@@ -313,3 +313,254 @@ export function queryCommitPickerRows(repoId: number): CommitPickerRow[] {
     )
     .all(repoId) as CommitPickerRow[];
 }
+
+// ---------------------------------------------------------------------------
+// Author metrics over a filtered H (the brief's section 2.5)
+//
+// h[a] is the canonical author identity (the .mailmap-mapped name+email stored
+// at ingest); a is that identity, so I(a,h) = 1 iff a = h[a]. The raw identity
+// is kept per commit, which is what lets the manual merge re-map it later.
+// ---------------------------------------------------------------------------
+
+export interface AuthorLeaderboardRow {
+  name: string;
+  email: string;
+  /** Σ I(a,h) over h ∈ H — the author's commits in the set. */
+  commits: number;
+  added: number;
+  removed: number;
+  growth: number;
+  /** λ_{H,root,a}: the author's churn over the whole repository (root object). */
+  churn: number;
+  /** ω_{H,root,a} = λ_a / λ_root — 0 when the root churn is 0. */
+  ownership: number;
+}
+
+export interface AuthorObjectRow {
+  name: string;
+  email: string;
+  /** n_{H,o,a}: commits of the author with churn λ(h,o) > 0. */
+  modifications: number;
+  added: number;
+  removed: number;
+  /** λ_{H,o,a}: the author's churn on the object. */
+  churn: number;
+  /** ω_{H,o,a} = λ_a / λ_{H,o} — 0 when the object's churn is 0. */
+  ownership: number;
+}
+
+export interface ObjectAuthorMetrics {
+  path: string;
+  /** "file" or "directory" — which delta table the object was found in. */
+  kind: "file" | "directory";
+  /** λ_{H,o}: the object's total churn over the commit set. */
+  churn: number;
+  authors: AuthorObjectRow[];
+}
+
+export interface ObjectTopAuthor {
+  path: string;
+  name: string;
+  email: string;
+  /** The top author's churn on the object (0 when the object has no churn). */
+  churn: number;
+  /** ω of the top author — 0 when the object's churn is 0. */
+  ownership: number;
+}
+
+/** churn of the root directory over the filtered H: the ownership denominator. */
+function rootChurn(repoId: number, condition: { sql: string; params: Array<number | string> }): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(x.added + x.removed), 0) AS churn
+       FROM dir_deltas x
+       JOIN commits c ON c.id = x.commit_id
+       WHERE x.repo_id = ? AND x.path = ? AND ${condition.sql}`,
+    )
+    .get(repoId, ROOT_DIR, ...condition.params) as { churn: number };
+  return row.churn;
+}
+
+/**
+ * The author leaderboard = the author metrics of the root object: for every
+ * canonical author a the churn λ_{H,root,a} (all files roll up to the root),
+ * the commit count Σ I(a,h) and the ownership ω_{H,root,a} (0 when the root
+ * churn is 0 — an empty commit set or a set of pure renames/binaries).
+ */
+export function queryAuthorLeaderboard(
+  repoId: number,
+  filter: ResolvedCommitSetFilter,
+): AuthorLeaderboardRow[] {
+  const db = getDb();
+  const condition = commitSetCondition(filter);
+  const denominator = rootChurn(repoId, condition);
+
+  const rows = db
+    .prepare(
+      `SELECT
+         c.canonical_name  AS name,
+         c.canonical_email AS email,
+         COUNT(DISTINCT c.id)      AS commits,
+         COALESCE(SUM(x.added), 0)   AS added,
+         COALESCE(SUM(x.removed), 0) AS removed
+       FROM commits c
+       LEFT JOIN file_deltas x ON x.commit_id = c.id
+       WHERE c.repo_id = ? AND ${condition.sql}
+       GROUP BY c.canonical_name, c.canonical_email
+       ORDER BY (COALESCE(SUM(x.added), 0) + COALESCE(SUM(x.removed), 0)) DESC,
+                c.canonical_name ASC, c.canonical_email ASC`,
+    )
+    .all(repoId, ...condition.params) as Array<{
+    name: string;
+    email: string;
+    commits: number;
+    added: number;
+    removed: number;
+  }>;
+
+  return rows.map((row) => {
+    const churn = row.added + row.removed;
+    return {
+      name: row.name,
+      email: row.email,
+      commits: row.commits,
+      added: row.added,
+      removed: row.removed,
+      growth: row.added - row.removed,
+      churn,
+      ownership: denominator === 0 ? 0 : churn / denominator,
+    };
+  });
+}
+
+/**
+ * Author metrics of one object o ∈ H[F] ∪ H[D]: per canonical author the
+ * modifications n_{H,o,a} (commits with λ(h,o) > 0), the churn λ_{H,o,a} and
+ * the ownership ω_{H,o,a}. File rows take precedence when a path has been
+ * both a file and a directory during its history.
+ * Returns null when the path has no deltas at all in the commit set.
+ */
+export function queryObjectAuthorMetrics(
+  repoId: number,
+  filter: ResolvedCommitSetFilter,
+  targetPath: string,
+): ObjectAuthorMetrics | null {
+  const db = getDb();
+  const condition = commitSetCondition(filter);
+
+  const objectRows = (
+    table: "file_deltas" | "dir_deltas",
+  ): Array<{
+    name: string;
+    email: string;
+    modifications: number;
+    added: number;
+    removed: number;
+  }> =>
+    db
+      .prepare(
+        `SELECT
+           c.canonical_name  AS name,
+           c.canonical_email AS email,
+           SUM(CASE WHEN x.added + x.removed > 0 THEN 1 ELSE 0 END) AS modifications,
+           SUM(x.added)   AS added,
+           SUM(x.removed) AS removed
+         FROM ${table} x
+         JOIN commits c ON c.id = x.commit_id
+         WHERE x.repo_id = ? AND x.path = ? AND ${condition.sql}
+         GROUP BY c.canonical_name, c.canonical_email
+         ORDER BY (SUM(x.added) + SUM(x.removed)) DESC, c.canonical_name ASC`,
+      )
+      .all(repoId, targetPath, ...condition.params) as Array<{
+      name: string;
+      email: string;
+      modifications: number;
+      added: number;
+      removed: number;
+    }>;
+
+  let kind: "file" | "directory";
+  let rows: ReturnType<typeof objectRows>;
+  const fileRows = objectRows("file_deltas");
+  if (fileRows.length > 0) {
+    kind = "file";
+    rows = fileRows;
+  } else {
+    const dirRows = objectRows("dir_deltas");
+    if (dirRows.length === 0) return null;
+    kind = "directory";
+    rows = dirRows;
+  }
+
+  const churn = rows.reduce((sum, row) => sum + row.added + row.removed, 0);
+  return {
+    path: targetPath,
+    kind,
+    churn,
+    authors: rows.map((row) => {
+      const authorChurn = row.added + row.removed;
+      return {
+        name: row.name,
+        email: row.email,
+        modifications: row.modifications,
+        added: row.added,
+        removed: row.removed,
+        churn: authorChurn,
+        ownership: churn === 0 ? 0 : authorChurn / churn,
+      };
+    }),
+  };
+}
+
+/**
+ * The top author of every file (or directory): the one with the highest churn
+ * λ_{H,o,a} on the object, with the ownership ω_{H,o,a} (0 when the object's
+ * churn is 0). Ties break on the author name so the choice is deterministic.
+ */
+export function queryObjectTopAuthors(
+  repoId: number,
+  filter: ResolvedCommitSetFilter,
+  table: "file_deltas" | "dir_deltas",
+): ObjectTopAuthor[] {
+  const condition = commitSetCondition(filter);
+  return getDb()
+    .prepare(
+      `SELECT path, name, email, churn, ownership FROM (
+         SELECT
+           x.path AS path,
+           c.canonical_name  AS name,
+           c.canonical_email AS email,
+           SUM(x.added + x.removed) AS churn,
+           CASE
+             WHEN SUM(SUM(x.added + x.removed)) OVER (PARTITION BY x.path) = 0 THEN 0
+             ELSE SUM(x.added + x.removed) * 1.0
+                  / SUM(SUM(x.added + x.removed)) OVER (PARTITION BY x.path)
+           END AS ownership,
+           ROW_NUMBER() OVER (
+             PARTITION BY x.path
+             ORDER BY SUM(x.added + x.removed) DESC, c.canonical_name ASC, c.canonical_email ASC
+           ) AS rn
+         FROM ${table} x
+         JOIN commits c ON c.id = x.commit_id
+         WHERE x.repo_id = ? AND ${condition.sql}
+         GROUP BY x.path, c.canonical_name, c.canonical_email
+       ) WHERE rn = 1`,
+    )
+    .all(repoId, ...condition.params) as ObjectTopAuthor[];
+}
+
+/**
+ * How many commits of the repository had their author identity changed by the
+ * .mailmap (raw identity ≠ canonical identity) — 0 when there was no mailmap.
+ */
+export function countMailmapMergedCommits(repoId: number): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n
+       FROM commits
+       WHERE repo_id = ?
+         AND (author_name != canonical_name OR author_email != canonical_email)`,
+    )
+    .get(repoId) as { n: number };
+  return row.n;
+}

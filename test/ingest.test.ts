@@ -30,7 +30,8 @@ test("fixture repo totals match hand-computed values (ingest hard rules)", async
   );
 
   assert.deepEqual(got, EXPECTED.files);
-  assert.equal(got["bin.dat"], undefined, "binary file must not be measured");
+  // "in" rather than indexing: got's inferred keys are the fixture's literal paths.
+  assert.equal("bin.dat" in got, false, "binary file must not be measured");
   assert.deepEqual(summarizeTotals(files), EXPECTED.totals);
 });
 
@@ -99,6 +100,45 @@ test("corrupt zip is rejected with a friendly error", async () => {
   fs.writeFileSync(badZip, "this is not a zip");
 
   assert.throws(() => ingestFromZip(badZip, { name: "bad" }), /zip/i);
+});
+
+test("URL ingestion (git clone --mirror) produces identical totals", async () => {
+  const { ingestFromUrl } = await import("../lib/git/ingest.ts");
+  const { queryDirectoryTotals, queryFileTotals, summarizeTotals } = await import(
+    "../lib/queries.ts"
+  );
+
+  // file:// forces the real clone transport, so the offline test exercises
+  // the same code path as an https:// URL.
+  const result = ingestFromUrl(`file://${repoDir}`, { name: "fixture-url" });
+
+  assert.equal(result.commitCount, EXPECTED.commitCount);
+  assert.deepEqual(summarizeTotals(queryFileTotals(result.repoId)), EXPECTED.totals);
+  assert.deepEqual(
+    Object.fromEntries(
+      queryDirectoryTotals(result.repoId).map((d) => [
+        d.path,
+        { added: d.added, removed: d.removed },
+      ]),
+    ),
+    EXPECTED.directories,
+  );
+});
+
+test("URL ingestion rejects an empty or unclonable URL and adds no repository", async () => {
+  const { ingestFromUrl } = await import("../lib/git/ingest.ts");
+  const { getDb } = await import("../lib/db.ts");
+
+  assert.throws(() => ingestFromUrl("   ", { name: "empty" }), /URL/i);
+
+  const count = () =>
+    (getDb().prepare("SELECT COUNT(*) AS n FROM repos").get() as { n: number }).n;
+  const before = count();
+  assert.throws(
+    () => ingestFromUrl("file:///definitely/not/a/repo.git", { name: "nope" }),
+    /failed/i,
+  );
+  assert.equal(count(), before, "a failed clone must not leave a repository row behind");
 });
 
 test("cross-check: stored totals equal raw git numstat sums", async () => {

@@ -6,7 +6,9 @@
  *   RAT_URL=http://localhost:3100 npm run smoke
  *
  * It builds a fixture repo with known metrics, zips it, uploads it over HTTP,
- * and checks the API + rendered page against the hand-computed values.
+ * then clones the same repo from a file:// URL, and checks the API + rendered
+ * page against the hand-computed values (plus error handling: bad zip, bad
+ * URL, and file/URL form validation).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -106,6 +108,42 @@ try {
     JSON.stringify(repo),
   );
 
+  // Author metrics: the fixture has a single author owning everything.
+  const authorMetrics = metrics.authorMetrics ?? {};
+  const singleAuthor =
+    Array.isArray(authorMetrics.authors) &&
+    authorMetrics.authors.length === 1 &&
+    authorMetrics.authors[0].name === "Fixture Author" &&
+    authorMetrics.authors[0].churn === EXPECTED.totals.churn &&
+    authorMetrics.authors[0].ownership === 1;
+  check(
+    "author leaderboard (single author, full ownership)",
+    singleAuthor,
+    JSON.stringify(authorMetrics.authors ?? null),
+  );
+
+  const dTxt = (metrics.files ?? []).find((f) => f.path === "d.txt");
+  check(
+    "per-object top author attached to file rows",
+    dTxt !== undefined &&
+      dTxt.topAuthor !== null &&
+      dTxt.topAuthor.name === "Fixture Author" &&
+      dTxt.topAuthor.ownership === 1,
+    JSON.stringify(dTxt?.topAuthor ?? null),
+  );
+
+  const objectDetail = await fetch(
+    `${baseUrl}/api/repos/${repoId}/metrics?object=${encodeURIComponent("d.txt")}`,
+  );
+  const objectBody = await objectDetail.json();
+  check(
+    "per-object author metrics endpoint (?object=)",
+    objectDetail.status === 200 &&
+      objectBody.authorMetrics?.object?.path === "d.txt" &&
+      objectBody.authorMetrics.object.authors[0].churn === 7,
+    JSON.stringify(objectBody.authorMetrics?.object ?? null),
+  );
+
   const page = await fetch(`${baseUrl}/repos/${repoId}`);
   const html = await page.text();
   check(
@@ -118,6 +156,11 @@ try {
     page.status === 200 && html.includes("(repo root)") && html.includes("src/lib"),
     `HTTP ${page.status}`,
   );
+  check(
+    "dashboard page renders the author metrics",
+    page.status === 200 && html.includes("Author metrics") && html.includes("Fixture Author"),
+    `HTTP ${page.status}`,
+  );
 
   const badForm = new FormData();
   badForm.set("file", new Blob([Buffer.from("not a zip")], { type: "application/zip" }), "bad.zip");
@@ -127,6 +170,63 @@ try {
     "invalid upload rejected with a friendly error",
     badUpload.status === 400 && typeof badBody.error === "string",
     badBody.error ?? `HTTP ${badUpload.status}`,
+  );
+
+  // URL ingestion: file:// runs the same clone transport as https://.
+  const urlForm = new FormData();
+  urlForm.set("url", `file://${repoDir}`);
+  urlForm.set("name", "smoke clone");
+  const urlUpload = await fetch(`${baseUrl}/api/repos`, { method: "POST", body: urlForm });
+  const urlBody = await urlUpload.json().catch(() => ({}));
+  check(
+    "POST /api/repos clones a URL and ingests",
+    urlUpload.status === 201 && typeof urlBody.repoId === "number",
+    `HTTP ${urlUpload.status} ${JSON.stringify(urlBody)}`,
+  );
+  if (typeof urlBody.repoId === "number") {
+    const urlMetrics = await (await fetch(`${baseUrl}/api/repos/${urlBody.repoId}/metrics`)).json();
+    check(
+      "URL clone yields the same totals as the zip upload",
+      urlMetrics.totals.added === EXPECTED.totals.added &&
+        urlMetrics.totals.removed === EXPECTED.totals.removed &&
+        urlMetrics.totals.churn === EXPECTED.totals.churn &&
+        urlBody.commitCount === EXPECTED.commitCount,
+      `${JSON.stringify(urlMetrics.totals)} vs expected ${JSON.stringify(EXPECTED.totals)}`,
+    );
+  }
+
+  const bothForm = new FormData();
+  bothForm.set("file", new Blob([fs.readFileSync(zipPath)], { type: "application/zip" }), "repo.zip");
+  bothForm.set("url", `file://${repoDir}`);
+  const bothUpload = await fetch(`${baseUrl}/api/repos`, { method: "POST", body: bothForm });
+  const bothBody = await bothUpload.json().catch(() => ({}));
+  check(
+    "file + url together rejected with a friendly error",
+    bothUpload.status === 400 && typeof bothBody.error === "string",
+    bothBody.error ?? `HTTP ${bothUpload.status}`,
+  );
+
+  const neitherUpload = await fetch(`${baseUrl}/api/repos`, {
+    method: "POST",
+    body: new FormData(),
+  });
+  const neitherBody = await neitherUpload.json().catch(() => ({}));
+  check(
+    "empty upload rejected with a friendly error",
+    neitherUpload.status === 400 && typeof neitherBody.error === "string",
+    neitherBody.error ?? `HTTP ${neitherUpload.status}`,
+  );
+
+  const badUrlForm = new FormData();
+  badUrlForm.set("url", "file:///definitely/not/a/repo.git");
+  const badUrlUpload = await fetch(`${baseUrl}/api/repos`, { method: "POST", body: badUrlForm });
+  const badUrlBody = await badUrlUpload.json().catch(() => ({}));
+  check(
+    "failed clone rejected with a friendly error",
+    badUrlUpload.status === 400 &&
+      typeof badUrlBody.error === "string" &&
+      /failed/i.test(badUrlBody.error),
+    badUrlBody.error ?? `HTTP ${badUrlUpload.status}`,
   );
 } catch (err) {
   console.error(`Smoke test aborted: ${err instanceof Error ? err.message : err}`);

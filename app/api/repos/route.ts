@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { getDb } from "../../../lib/db";
-import { ingestFromZip } from "../../../lib/git/ingest";
+import { ingestFromUrl, ingestFromZip, repoNameFromUrl } from "../../../lib/git/ingest";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,23 +13,37 @@ export async function POST(request: Request) {
   try {
     const form = await request.formData();
     const file = form.get("file");
-    if (file === null || typeof file === "string") {
+    const urlValue = form.get("url");
+    const url = typeof urlValue === "string" ? urlValue.trim() : "";
+    const hasFile = file !== null && typeof file !== "string";
+
+    if (!hasFile && url === "") {
       return NextResponse.json(
-        { error: "Attach a .zip file of a Git repository." },
+        { error: "Attach a .zip file of a Git repository, or provide a remote repository URL." },
+        { status: 400 },
+      );
+    }
+    if (hasFile && url !== "") {
+      return NextResponse.json(
+        { error: "Provide either a .zip file or a repository URL, not both." },
         { status: 400 },
       );
     }
 
     const uploadName =
-      typeof (file as File).name === "string" ? (file as File).name : "repository.zip";
+      hasFile && typeof (file as File).name === "string" ? (file as File).name : "repository.zip";
     const name =
       String(form.get("name") ?? "").trim() ||
-      uploadName.replace(/\.zip$/i, "") ||
+      (url !== "" ? repoNameFromUrl(url) : uploadName.replace(/\.zip$/i, "")) ||
       "Unnamed repository";
+
+    if (url !== "") {
+      return NextResponse.json(ingestFromUrl(url, { name }), { status: 201 });
+    }
 
     uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "rat-upload-"));
     const zipPath = path.join(uploadDir, "upload.zip");
-    fs.writeFileSync(zipPath, Buffer.from(await file.arrayBuffer()));
+    fs.writeFileSync(zipPath, Buffer.from(await (file as File).arrayBuffer()));
 
     const result = ingestFromZip(zipPath, { name });
     return NextResponse.json(result, { status: 201 });

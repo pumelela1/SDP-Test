@@ -9,6 +9,7 @@ import {
 } from "../lib/git/parseLog.ts";
 
 const NUL = "\0";
+const FIELD_SEP = "\x02";
 
 function commitLine(
   sha: string,
@@ -16,8 +17,12 @@ function commitLine(
   ts: number,
   name = "Ann",
   email = "ann@example.com",
+  canonicalName?: string,
+  canonicalEmail?: string,
 ): string {
-  return `\x01${sha}\x02${parents}\x02${ts}\x02${name}\x02${email}`;
+  const mapped =
+    canonicalName === undefined ? "" : `${FIELD_SEP}${canonicalName}${FIELD_SEP}${canonicalEmail}`;
+  return `\x01${sha}${FIELD_SEP}${parents}${FIELD_SEP}${ts}${FIELD_SEP}${name}${FIELD_SEP}${email}${mapped}`;
 }
 
 test("parses commit headers and numstat rows (-z stream)", () => {
@@ -38,6 +43,8 @@ test("parses commit headers and numstat rows (-z stream)", () => {
     committerTs: 1700000000,
     authorName: "Ann",
     authorEmail: "ann@example.com",
+    canonicalName: "Ann",
+    canonicalEmail: "ann@example.com",
     files: [
       { path: "new.txt", added: 12, removed: 0 },
       { path: "old.txt", added: 3, removed: 8 },
@@ -48,6 +55,19 @@ test("parses commit headers and numstat rows (-z stream)", () => {
   // Initial commit: h[p] = empty commit => no parent sha.
   assert.equal(commits[1].parentSha, null);
   assert.deepEqual(commits[1].files, [{ path: "first.txt", added: 5, removed: 0 }]);
+});
+
+test("keeps the .mailmap-mapped author identity (%aN/%aE) next to the raw one", () => {
+  const log = [
+    commitLine("abc", "def", 1, "ann.laptop", "ann@personal.example", "Ann", "ann@corp.example"),
+    "1\t0\ta.txt",
+  ].join(NUL);
+
+  const [commit] = parseGitLog(log);
+  assert.equal(commit.authorName, "ann.laptop");
+  assert.equal(commit.authorEmail, "ann@personal.example");
+  assert.equal(commit.canonicalName, "Ann");
+  assert.equal(commit.canonicalEmail, "ann@corp.example");
 });
 
 test("skips binary rows (git numstat marks them with '-')", () => {
